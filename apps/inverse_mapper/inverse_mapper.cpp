@@ -465,7 +465,7 @@ int main(int argc, char const ** argv)
                 // First, search for the most promising end position.
 
                 unsigned ndlLength = sequenceLength(readId, targetGenomeFragments);
-                int minScore = -static_cast<int>(ndlLength * options.errorRate);
+                int minScore = -static_cast<int>(options.filtrationDistance);
 
                 TGenomeInfix inf = infix(filterFinder);  // TODO(holtgrew): Cannot pass to myersFinder directly because of const issues.
                 TGenomeInfix origInf(inf);
