@@ -9,4 +9,6 @@ seqan_make_seqan_available(SeqAnCore)
 seqan_make_seqan_available(SeqAnExtras)
 seqan_make_seqan_available(SeqAnSandboxEz_seq_io)
 
+include_directories(../ez_seq_io/include)
+
 seqan_add_all_subdirectories()  # include_directory(*)

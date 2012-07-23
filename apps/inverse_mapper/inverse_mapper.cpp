@@ -368,13 +368,13 @@ int main(int argc, char const ** argv)
 
     typedef seqan::Dna5String TReadSeq;
     typedef seqan::StringSet<TReadSeq> /*const*/ TReadSet;
-    typedef typename seqan::Value<TReadSet>::Type /*const*/ TReadSeq;
-    typedef typename seqan::Value<TReadSet>::Type /*const*/ TReadPrefix;
+    typedef seqan::Value<TReadSet>::Type /*const*/ TReadSeq;
+    typedef seqan::Value<TReadSet>::Type /*const*/ TReadPrefix;
     typedef seqan::ModifiedString<TReadPrefix, seqan::ModReverse> TRevReadPrefix;
 
     typedef seqan::Dna5String TContigSeq;
-    typedef typename seqan::Infix<TContigSeq>::Type TGenomeInfix;
-    typedef typename seqan::Position<TGenomeInfix>::Type			TPosition;
+    typedef seqan::Infix<TContigSeq>::Type TGenomeInfix;
+    typedef seqan::Position<TGenomeInfix>::Type			TPosition;
     typedef seqan::ModifiedString<TGenomeInfix, seqan::ModReverse> TGenomeInfixRev;
     typedef seqan::Finder<TGenomeInfix> TMyersFinder;
 
