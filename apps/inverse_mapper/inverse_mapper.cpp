@@ -72,6 +72,10 @@ struct AppOptions
 
     // The minimal distance a read must have to not be filtered out.
     unsigned minDistance;
+    // The maximal number of matches a read may have with its best distance before it is filtered out.
+    unsigned maxBestHits;
+    // The distance to use for the filtration.
+    unsigned filtrationDistance;
 
     // The error rate, computed from word size and min distance.
     double errorRate;
@@ -82,8 +86,13 @@ struct AppOptions
     // Path to output file.
     seqan::CharString outFile;
 
-    AppOptions() : verbosity(1), wordSize(0), minDistance(0), errorRate(0), repeatLength(1000)
+    AppOptions() : verbosity(1), wordSize(0), minDistance(0), maxBestHits(0), filtrationDistance(0), errorRate(0), repeatLength(1000)
     {}
+
+    unsigned computeQ() const
+    {
+        return wordSize / (minDistance + 1);
+    }
 };
 
 // --------------------------------------------------------------------------
@@ -106,14 +115,16 @@ struct ReadStats
     int prevMatchRefId;
     int prevMatchBeginPos;
 
-    void update(int distance, int optionsMinDistance, int refId, bool rc, int beginPos, int ndlLength)
+    void update(int distance, int refId, bool rc, int beginPos, AppOptions const & options)
     {
         if (distance == bestFoundDistance)
         {
-            if ((prevMatchRefId == refId) && (rc == prevMatchRC) && (beginPos - prevMatchBeginPos < ndlLength))
+            if ((prevMatchRefId == refId) && (rc == prevMatchRC) && (beginPos - prevMatchBeginPos < (int)options.wordSize))
                 return;  // Skip, too near.
 
             numBestMatches += 1;
+            if (numBestMatches > (int)options.maxBestHits)
+                enabled = false;
 
             prevMatchRC = rc;
             prevMatchRefId = refId;
@@ -124,7 +135,7 @@ struct ReadStats
             bestFoundDistance = distance;
             numBestMatches = 1;
 
-            if (distance < optionsMinDistance)
+            if (distance < (int)options.minDistance)
                 enabled = false;
 
             prevMatchRC = rc;
@@ -189,9 +200,13 @@ parseCommandLine(AppOptions & options, int argc, char const ** argv)
     // Algorithm Options.
     addSection(parser, "Algorithm Options");
     addOption(parser, seqan::ArgParseOption("w", "word-size", "Word size.", seqan::ArgParseArgument::INTEGER, "INT"));
-    setDefaultValue(parser, "word-size", "14");
+    setDefaultValue(parser, "word-size", "18");
     addOption(parser, seqan::ArgParseOption("d", "min-distance", "Smallest edit distance a sequence of \\fITARGET\\fP must have to \\fIHOST\\fP.", seqan::ArgParseArgument::INTEGER, "INT"));
     setDefaultValue(parser, "min-distance", "2");
+    addOption(parser, seqan::ArgParseOption("f", "filtration-distance", "Distance to use for the string filter search.", seqan::ArgParseArgument::INTEGER, "INT"));
+    setDefaultValue(parser, "filtration-distance", "2");
+    addOption(parser, seqan::ArgParseOption("m", "max-best-hits", "Maximal number of best hits before disabling.", seqan::ArgParseArgument::INTEGER, "INT"));
+    setDefaultValue(parser, "max-best-hits", "10");
 
     // Parse command line.
     seqan::ArgumentParser::ParseResult res = seqan::parse(parser, argc, argv);
@@ -212,6 +227,8 @@ parseCommandLine(AppOptions & options, int argc, char const ** argv)
     getOptionValue(options.targetGenomePath, parser, "target");
     getOptionValue(options.wordSize, parser, "word-size");
     getOptionValue(options.minDistance, parser, "min-distance");
+    getOptionValue(options.filtrationDistance, parser, "filtration-distance");
+    getOptionValue(options.maxBestHits, parser, "max-best-hits");
     options.errorRate = ((1.0 * options.minDistance) / options.wordSize) + 0.0001;
     getOptionValue(options.outFile, parser, "out-file");
 
@@ -256,50 +273,72 @@ int main(int argc, char const ** argv)
     if (res != seqan::ArgumentParser::PARSE_OK)
         return res == seqan::ArgumentParser::PARSE_ERROR;
 
-    std::cout << "INVERSE MAPPER\n"
-              << "==============\n\n";
+    if (options.verbosity > 0)
+        std::cout << "INVERSE MAPPER\n"
+                  << "==============\n\n";
 
     // Print the command line arguments back to the user.
     if (options.verbosity > 0)
     {
         std::cout << "__OPTIONS____________________________________________________________________\n"
                   << '\n'
-                  << "VERBOSITY   \t" << options.verbosity << '\n'
-                  << "HOST        \t" << options.hostGenomePath << '\n'
-                  << "TARGET      \t" << options.targetGenomePath << '\n'
-                  << "WORD SIZE   \t" << options.wordSize << '\n'
-                  << "MIN DISTANCE\t" << options.minDistance << '\n'
-                  << "ERROR RATE  \t[%] " << 100.0 * options.errorRate << "\n\n";
+                  << "VERBOSITY      \t" << options.verbosity << '\n'
+                  << "HOST           \t" << options.hostGenomePath << '\n'
+                  << "TARGET         \t" << options.targetGenomePath << '\n'
+                  << "WORD SIZE      \t" << options.wordSize << '\n'
+                  << "FILTER DISTANCE\t" << options.filtrationDistance << '\n'
+                  << "MIN DISTANCE   \t" << options.minDistance << '\n'
+                  << "MAX BEST HITS  \t" << options.maxBestHits << '\n'
+                  << "Q-GRAM SIZE    \t" << options.computeQ() << '\n'
+                  << "ERROR RATE     \t[%] " << 100.0 * options.errorRate << "\n\n";
     }
 
     // -----------------------------------------------------------------------
     // Load / Build Host FAI Index.
     // -----------------------------------------------------------------------
 
+    if (options.verbosity > 0)
+        std::cout << "__START-UP I/O ______________________________________________________________\n\n";
+
     // Try to load index and create on the fly if necessary.
     seqan::FaiIndex faiIndex;
-    std::cout << "Loading Index...\n";
+    if (options.verbosity > 0)
+        std::cout << "Loading Index...\t" << std::flush;
     if (seqan::load(faiIndex, options.hostGenomePath) != 0)
     {
-        std::cout << "Building Index...\n";
+        if (options.verbosity > 0)
+            std::cout << "NOT FOUND\n"
+                      << "Building Index...\t" << std::flush;
         if (seqan::buildIndex(options.hostGenomePath, seqan::Fai()) != 0)
         {
-            std::cerr << "ERROR: Index could not be loaded or built.\n";
+            if (options.verbosity > 0)
+                std::cerr << "\nERROR: Index could not be loaded or built.\n";
             return 1;
         }
-        std::cout << "Loading Index...\n";
+        if (options.verbosity > 0)
+            std::cout << "DONE\n"
+                      << "Loading Index...\t";
         if (seqan::load(faiIndex, options.hostGenomePath) != 0)
         {
-            std::cerr << "ERROR: Index could not be loaded after building.\n";
+            if (options.verbosity > 0)
+                std::cerr << "\nERROR: Index could not be loaded after building.\n";
             return 1;
         }
+        if (options.verbosity > 0)
+            std::cout << "DONE\n";
+    }
+    else
+    {
+        if (options.verbosity > 0)
+            std::cout << "DONE\n";
     }
 
     // -----------------------------------------------------------------------
     // Load Target Genome, Build Fragments.
     // -----------------------------------------------------------------------
 
-    std::cerr << "Building target genome fragments...\n";
+    if (options.verbosity > 0)
+        std::cerr << "Building fragments...\t";
 
     seqan::SequenceIO seqIO(options.targetGenomePath);
     seqan::StringSet<seqan::CharString> targetGenomeIds;
@@ -311,12 +350,12 @@ int main(int argc, char const ** argv)
     // Load the target genome fragment-wise.
     seqan::CharString id;
     seqan::Dna5String seq;
-    seqan::String<ReadStats> readStats;
+    seqan::String<ReadStats> readStats;  // TODO(holtgrew): Rename, because read == fragment.
     for (unsigned seqId = 0; !atEnd(seqIO); ++seqId)
     {
         if (readRecord(id, seq, seqIO) != 0)
         {
-            std::cerr << "ERROR: Problem reading target sequence!\n";
+            std::cerr << "\nERROR: Problem reading target sequence!\n";
             return 1;
         }
 
@@ -335,180 +374,187 @@ int main(int argc, char const ** argv)
         }
     }
 
-    std::cerr << "Built " << length(targetGenomeFragments) << " fragments\n";
+    if (options.verbosity > 0)
+        std::cerr << "DONE\n\n"
+                  << "FRAGMENTS\t" << length(targetGenomeFragments) << "\n\n"
+                  << "__PERFORMING SEARCH__________________________________________________________\n\n";
 
-    unsigned q = options.wordSize / (options.minDistance + 1);
-    std::cerr << "Building q-gram index with q = " << q << "...\n";
-    typedef seqan::Shape<seqan::Dna5, seqan::SimpleShape>    TShape;
-    TShape shape(q);
-
-    typedef seqan::StringSet<seqan::Dna5String>              TFragmentSet;
-    typedef seqan::IndexQGram<TShape, seqan::OpenAddressing> TSpec;
-    typedef seqan::Index<TFragmentSet, TSpec>                TQGramIndex;
-    TQGramIndex index(targetGenomeFragments, shape);
-
-    std::cerr << "Built q-gram index.\n";
-
-    typedef seqan::Pattern<TQGramIndex, seqan::Pigeonhole<> > TFilterPattern;
-    TFilterPattern filterPattern(index);
-	filterPattern.params.printDots = (options.verbosity > 0);
-    _patternInit(filterPattern, options.errorRate);
-    indexRequire(host(filterPattern), seqan::QGramSADir());
-
-    seqan::Dna5String contigSeq;
-    if (getSequence(contigSeq, faiIndex, 0) != 0)
+    // Run pigeonhole+banded Myers search for each contig.
+    for (unsigned refId = 0; refId < numSeqs(faiIndex); ++refId)
     {
-        std::cerr << "ERROR: Could not load sequence 0\n";
-        return 1;
-    }
-
-    std::cerr << "Performing search...\n";
-
-    typedef seqan::Finder<seqan::Dna5String, seqan::Pigeonhole<> > TFilterFinder;
-
-    typedef seqan::Dna5String TReadSeq;
-    typedef seqan::StringSet<TReadSeq> /*const*/ TReadSet;
-    typedef seqan::Value<TReadSet>::Type /*const*/ TReadSeq;
-    typedef seqan::Value<TReadSet>::Type /*const*/ TReadPrefix;
-    typedef seqan::ModifiedString<TReadPrefix, seqan::ModReverse> TRevReadPrefix;
-
-    typedef seqan::Dna5String TContigSeq;
-    typedef seqan::Infix<TContigSeq>::Type TGenomeInfix;
-    typedef seqan::Position<TGenomeInfix>::Type			TPosition;
-    typedef seqan::ModifiedString<TGenomeInfix, seqan::ModReverse> TGenomeInfixRev;
-    typedef seqan::Finder<TGenomeInfix> TMyersFinder;
-
-    typedef seqan::Finder<TGenomeInfix> TMyersFinder;
-    typedef seqan::Finder<TGenomeInfixRev>							TMyersFinderRev;
-    typedef seqan::PatternState_<TReadPrefix,	seqan::Myers<seqan::AlignTextBanded<seqan::FindInfix, seqan::NMatchesNone_, seqan::NMatchesNone_>, seqan::True, void> > TPatternState;
-    typedef seqan::PatternState_<TRevReadPrefix, seqan::Myers<seqan::AlignTextBanded<seqan::FindPrefix, seqan::NMatchesNone_, seqan::NMatchesNone_>, seqan::True, void> > TRPatternState;
-
-    TPatternState	patternState;
-    TRPatternState  revPatternState;
-
-    unsigned        rightClip = 0;
-    unsigned        contigLength = length(contigSeq);
-
-    int refId = 0;
-    // Perform filtration on forward and reverse strand.
-    for (unsigned pass = 0; pass < 2; ++pass)  // Pass 1: FWD, Pass 2: REV.
-    {
-        bool forward = (pass == 0);
-        if (pass == 1)
-            reverseComplement(contigSeq);
-        TFilterFinder filterFinder(contigSeq, options.repeatLength, 1);
-
-        double contigStartTime = sysTime();
-        if (options.verbosity > 0)
-            std::cerr << '[' << faiIndex.indexEntryStore[refId].name << "/" << (pass ? "fwd " : "rev ") << (length(contigSeq) / 1000 / 1000) << "M] ";
-        while (find(filterFinder, filterPattern, options.errorRate))
+        // Load contig.
+        seqan::Dna5String contigSeq;
+        if (getSequence(contigSeq, faiIndex, refId) != 0)
         {
-            unsigned readId = position(filterPattern).i1;
-            // Skip if disabled.
-            if (!readStats[readId].enabled)
-                continue;
-            
-            // Compute clipping for banded Myers if SWIFT it is left/right of the text.
-            patternState.leftClip = (beginPosition(filterFinder) >= 0) ? 0 : -beginPosition(filterFinder);
-            rightClip = (endPosition(filterFinder) <= contigLength) ? 0 : endPosition(filterFinder) - contigLength;
-
-            // Verify SWIFT hit.
-            //
-            // We use a much simpler version of verification than in RazerS for now.
-
-            // First, search for the most promising end position.
-
-            unsigned ndlLength = sequenceLength(readId, targetGenomeFragments);
-            int minScore = -static_cast<int>(ndlLength * options.errorRate);
-
-            TGenomeInfix inf = infix(filterFinder);  // TODO(holtgrew): Cannot pass to myersFinder directly because of const issues.
-            TGenomeInfix origInf(inf);
-            setEndPosition(inf, endPosition(inf) - 1);
-            ndlLength -= 1;
-            TReadPrefix readPrefix(targetGenomeFragments[readId], ndlLength);
-            TMyersFinder myersFinder(inf);
-            int bestScore = seqan::MinValue<int>::VALUE;
-            unsigned bestPos = 0;
-            if (options.verbosity >= 11)
-                std::cerr << "    CONTIG: " << origInf << std::endl
-                          << "    READ:   " << targetGenomeFragments[readId] << std::endl
-                          << "    PREFIX: " << readPrefix << std::endl;
-            
-            while (find(myersFinder, readPrefix, patternState, minScore))  // Iterate over all start positions.
-            {
-                TPosition const pos = position(hostIterator(myersFinder));
-                int score = getScore(patternState);
-
-                SEQAN_ASSERT_LT(pos + 1, length(origInf));
-                if (origInf[pos + 1] != back(targetGenomeFragments[readId]) || origInf[pos + 1] == seqan::unknownValue<seqan::Dna5>())
-                    if (--score < minScore)
-                        continue;
-
-                if (getScore(patternState) > bestScore)
-                {
-                    bestScore = score;
-                    bestPos = pos;
-                }
-                if (options.verbosity >= 11)
-                    std::cerr << "MYERS CANDIDATE\t" << position(filterPattern).i1 << "\t" << refId << "\t" << (forward ? '+' : '-') << "\t" << contigLength << "\t" << (beginPosition(inf) + pos) << std::endl;
-            }
-            if (bestScore == seqan::MinValue<int>::VALUE)
-                continue;  // No Myers hit, look for next SWIFT hit.
-
-            // Second, search for the leftmost start position of the hit.
-            __int64 infEndPos = endPosition(inf);
-            __int64 newInfEndPos = beginPosition(inf) + bestPos + 1;
-            revPatternState.leftClip = infEndPos - newInfEndPos + rightClip;
-            setEndPosition(inf, newInfEndPos);
-            if (endPosition(inf) > (unsigned)(ndlLength - bestScore))
-                setBeginPosition(inf, endPosition(inf) - ndlLength + bestScore);
-            else
-                setBeginPosition(inf, 0);
-
-            // Correct bestScore for reverse search below.
-            if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
-                bestScore += 1;
-
-            TRevReadPrefix readRev(readPrefix);
-            TGenomeInfixRev infRev(inf);
-            TMyersFinderRev myersFinderRev(infRev);
-            __int64 beginPos = newInfEndPos;
-            if (options.verbosity >= 4)
-                std::cerr << "  R CONTIG:     " << infRev << std::endl
-                          << "  R READPRFX:   " << readRev << std::endl
-                          << "    best score: " << bestScore << std::endl;
-            while (find(myersFinderRev, readRev, revPatternState, bestScore))
-                beginPos = newInfEndPos - (position(myersFinderRev) + 1);
-            if (beginPos == newInfEndPos)
-                continue;  // No Banded Myers hit, skip.
-
-            // Correct bestScore for output.
-            if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
-                bestScore -= 1;
-
-            // Update statistics for match.
-            int pos = forward ? beginPos : contigLength - (newInfEndPos + 1);
-            readStats[readId].update(-bestScore, options.minDistance, refId, !forward, pos, ndlLength);
-            
-            // Store the single-end match in the list of raw matches.
-            /*SingleEndMatch match;
-            match.readId = readId;
-            match.strand = forward ? '+' : '-';
-            match.contigId = contigId;
-            match.beginPos = forward ? beginPos : contigLength - (newInfEndPos + 1);
-            match.endPos = forward ? newInfEndPos + 1 : contigLength - beginPos;
-            match.score = bestScore;
-            appendValue(rawMatches, match);*/
+            std::cerr << "ERROR: Could not load sequence " << refId << "\n";
+            return 1;
         }
-        double contigTime = sysTime() - contigStartTime;
-        double megaBasesPerSecond = 1.0 * length(contigSeq) / 1000 / contigTime;
-        if (options.verbosity > 0)
+
+        typedef seqan::Finder<seqan::Dna5String, seqan::Pigeonhole<> > TFilterFinder;
+
+        typedef seqan::StringSet<seqan::Dna5String, seqan::Dependent<> > TFragmentSet;
+        typedef TFragmentSet TReadSet;
+        typedef seqan::Value<TReadSet>::Type /*const*/ TReadSeq;
+        typedef seqan::Value<TReadSet>::Type /*const*/ TReadPrefix;
+        typedef seqan::ModifiedString<TReadPrefix, seqan::ModReverse> TRevReadPrefix;
+
+        typedef seqan::Dna5String TContigSeq;
+        typedef seqan::Infix<TContigSeq>::Type TGenomeInfix;
+        typedef seqan::Position<TGenomeInfix>::Type			TPosition;
+        typedef seqan::ModifiedString<TGenomeInfix, seqan::ModReverse> TGenomeInfixRev;
+        typedef seqan::Finder<TGenomeInfix> TMyersFinder;
+
+        typedef seqan::Finder<TGenomeInfix> TMyersFinder;
+        typedef seqan::Finder<TGenomeInfixRev>							TMyersFinderRev;
+        typedef seqan::PatternState_<TReadPrefix,	seqan::Myers<seqan::AlignTextBanded<seqan::FindInfix, seqan::NMatchesNone_, seqan::NMatchesNone_>, seqan::True, void> > TPatternState;
+        typedef seqan::PatternState_<TRevReadPrefix, seqan::Myers<seqan::AlignTextBanded<seqan::FindPrefix, seqan::NMatchesNone_, seqan::NMatchesNone_>, seqan::True, void> > TRPatternState;
+
+        TPatternState	patternState;
+        TRPatternState  revPatternState;
+
+        unsigned        rightClip = 0;
+        unsigned        contigLength = length(contigSeq);
+
+        // Perform filtration on forward and reverse strand.
+        for (unsigned pass = 0; pass < 2; ++pass)  // Pass 1: FWD, Pass 2: REV.
         {
-            char buffer[100];
-            sprintf(buffer, "%.2f", contigTime);
-            std::cerr << ' ' << contigTime << " s";
-            sprintf(buffer, "%.2f", megaBasesPerSecond);
-            std::cerr << ' ' << buffer << " kbp/s\n";
+            unsigned q = options.computeQ();
+            // std::cerr << "Building q-gram index with q = " << q << "...\n";
+            typedef seqan::Shape<seqan::Dna5, seqan::SimpleShape>    TShape;
+            TShape shape(q);
+
+            TFragmentSet fragments;
+            for (unsigned fragId = 0; fragId < length(targetGenomeFragments); ++fragId)
+                if (readStats[fragId].enabled)
+                    assignValueById(fragments, targetGenomeFragments[fragId]);
+
+            typedef seqan::IndexQGram<TShape, seqan::OpenAddressing>  TSpec;
+            typedef seqan::Index<TFragmentSet, TSpec>                 TQGramIndex;
+            TQGramIndex index(fragments, shape);
+
+            typedef seqan::Pattern<TQGramIndex, seqan::Pigeonhole<> > TFilterPattern;
+            TFilterPattern filterPattern(index);
+            filterPattern.params.printDots = (options.verbosity > 0);
+            _patternInit(filterPattern, options.errorRate);
+            indexRequire(host(filterPattern), seqan::QGramSADir());
+
+            bool forward = (pass == 0);
+            if (pass == 1)
+                reverseComplement(contigSeq);
+            TFilterFinder filterFinder(contigSeq, options.repeatLength, 1);
+
+            double contigStartTime = sysTime();
+            if (options.verbosity > 0)
+                std::cerr << '[' << faiIndex.indexEntryStore[refId].name << "/" << (pass ? "rev " : "fwd ") << length(fragments) << " " << (length(contigSeq) / 1000 / 1000) << "M] " << std::flush;
+            while (find(filterFinder, filterPattern, options.errorRate))
+            {
+                unsigned readId = idToPosition(targetGenomeFragments, positionToId(fragments, position(filterPattern).i1));
+                // Skip if disabled.
+                if (!readStats[readId].enabled)
+                    continue;
+
+                // Compute clipping for banded Myers if SWIFT it is left/right of the text.
+                patternState.leftClip = (beginPosition(filterFinder) >= 0) ? 0 : -beginPosition(filterFinder);
+                rightClip = (endPosition(filterFinder) <= contigLength) ? 0 : endPosition(filterFinder) - contigLength;
+
+                // Verify SWIFT hit.
+                //
+                // We use a much simpler version of verification than in RazerS for now.
+
+                // First, search for the most promising end position.
+
+                unsigned ndlLength = sequenceLength(readId, targetGenomeFragments);
+                int minScore = -static_cast<int>(ndlLength * options.errorRate);
+
+                TGenomeInfix inf = infix(filterFinder);  // TODO(holtgrew): Cannot pass to myersFinder directly because of const issues.
+                TGenomeInfix origInf(inf);
+                setEndPosition(inf, endPosition(inf) - 1);
+                ndlLength -= 1;
+                TReadPrefix readPrefix(targetGenomeFragments[readId], ndlLength);
+                TMyersFinder myersFinder(inf);
+                int bestScore = seqan::MinValue<int>::VALUE;
+                unsigned bestPos = 0;
+                if (options.verbosity >= 11)
+                    std::cerr << "    CONTIG: " << origInf << std::endl
+                              << "    READ:   " << targetGenomeFragments[readId] << std::endl
+                              << "    PREFIX: " << readPrefix << std::endl;
+
+                while (find(myersFinder, readPrefix, patternState, minScore))  // Iterate over all start positions.
+                {
+                    TPosition const pos = position(hostIterator(myersFinder));
+                    int score = getScore(patternState);
+
+                    SEQAN_ASSERT_LT(pos + 1, length(origInf));
+                    if (origInf[pos + 1] != back(targetGenomeFragments[readId]) || origInf[pos + 1] == seqan::unknownValue<seqan::Dna5>())
+                        if (--score < minScore)
+                            continue;
+
+                    if (getScore(patternState) > bestScore)
+                    {
+                        bestScore = score;
+                        bestPos = pos;
+                    }
+                    if (options.verbosity >= 11)
+                        std::cerr << "MYERS CANDIDATE\t" << position(filterPattern).i1 << "\t" << refId << "\t" << (forward ? '+' : '-') << "\t" << contigLength << "\t" << (beginPosition(inf) + pos) << std::endl;
+                }
+                if (bestScore == seqan::MinValue<int>::VALUE)
+                    continue;  // No Myers hit, look for next SWIFT hit.
+
+                // Second, search for the leftmost start position of the hit.
+                __int64 infEndPos = endPosition(inf);
+                __int64 newInfEndPos = beginPosition(inf) + bestPos + 1;
+                revPatternState.leftClip = infEndPos - newInfEndPos + rightClip;
+                setEndPosition(inf, newInfEndPos);
+                if (endPosition(inf) > (unsigned)(ndlLength - bestScore))
+                    setBeginPosition(inf, endPosition(inf) - ndlLength + bestScore);
+                else
+                    setBeginPosition(inf, 0);
+
+                // Correct bestScore for reverse search below.
+                if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
+                    bestScore += 1;
+
+                TRevReadPrefix readRev(readPrefix);
+                TGenomeInfixRev infRev(inf);
+                TMyersFinderRev myersFinderRev(infRev);
+                __int64 beginPos = newInfEndPos;
+                if (options.verbosity >= 4)
+                    std::cerr << "  R CONTIG:     " << infRev << std::endl
+                              << "  R READPRFX:   " << readRev << std::endl
+                              << "    best score: " << bestScore << std::endl;
+                while (find(myersFinderRev, readRev, revPatternState, bestScore))
+                    beginPos = newInfEndPos - (position(myersFinderRev) + 1);
+                if (beginPos == newInfEndPos)
+                    continue;  // No Banded Myers hit, skip.
+
+                // Correct bestScore for output.
+                if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
+                    bestScore -= 1;
+
+                // Update statistics for match.
+                int pos = forward ? beginPos : contigLength - (newInfEndPos + 1);
+                readStats[readId].update(-bestScore, refId, !forward, pos, options);
+
+                // Store the single-end match in the list of raw matches.
+                /*SingleEndMatch match;
+                  match.readId = readId;
+                  match.strand = forward ? '+' : '-';
+                  match.contigId = contigId;
+                  match.beginPos = forward ? beginPos : contigLength - (newInfEndPos + 1);
+                  match.endPos = forward ? newInfEndPos + 1 : contigLength - beginPos;
+                  match.score = bestScore;
+                  appendValue(rawMatches, match);*/
+            }
+            double contigTime = sysTime() - contigStartTime;
+            double megaBasesPerSecond = 1.0 * length(contigSeq) / 1000 / contigTime;
+            if (options.verbosity > 0)
+            {
+                char buffer[100];
+                sprintf(buffer, "%.2f", contigTime);
+                std::cerr << ' ' << contigTime << "s";
+                sprintf(buffer, "%.2f", megaBasesPerSecond);
+                std::cerr << ' ' << buffer << "kbp/s\n";
+            }
         }
     }
 
@@ -516,10 +562,14 @@ int main(int argc, char const ** argv)
     // Output
     // -----------------------------------------------------------------------
 
+    if (options.verbosity > 0)
+        std::cout << "\n__WRITING OUTPUT_____________________________________________________________\n\n";
+
     std::fstream outFileStream;
     std::ostream * outStream = &std::cout;
     if (!empty(options.outFile))
     {
+        std::cout << "OUTPUT FILE\t" << options.outFile << "\n";
         outFileStream.open(toCString(options.outFile), std::ios_base::out | std::ios_base::binary);
         if (!outFileStream.good())
         {
@@ -528,6 +578,11 @@ int main(int argc, char const ** argv)
         }
         outStream = &outFileStream;
     }
+    else
+    {
+        std::cout << "OUTPUT STDOUT\n";
+    }
+
     (*outStream) << "fragment\ttarget ref\ttarget pos\tbest distance\tnum matches\n";
     for (unsigned i = 0; i < length(readStats); ++i)
     {
