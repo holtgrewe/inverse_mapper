@@ -101,22 +101,39 @@ struct ReadStats
     // Whether or not this read has been disabled.
     bool enabled;
 
-    void update(int distance, int optionsMinDistance)
+    // Position of previous match.
+    bool prevMatchRC;
+    int prevMatchRefId;
+    int prevMatchBeginPos;
+
+    void update(int distance, int optionsMinDistance, int refId, bool rc, int beginPos, int ndlLength)
     {
         if (distance == bestFoundDistance)
         {
+            if ((prevMatchRefId == refId) && (rc == prevMatchRC) && (beginPos - prevMatchBeginPos < ndlLength))
+                return;  // Skip, too near.
+
             numBestMatches += 1;
+
+            prevMatchRC = rc;
+            prevMatchRefId = refId;
+            prevMatchBeginPos = beginPos;
         }
-        else if (distance < bestFoundDistance)
+        else if (bestFoundDistance == -1 || distance < bestFoundDistance)
         {
             bestFoundDistance = distance;
             numBestMatches = 1;
+
             if (distance < optionsMinDistance)
                 enabled = false;
+
+            prevMatchRC = rc;
+            prevMatchRefId = refId;
+            prevMatchBeginPos = beginPos;
         }
     }
 
-    ReadStats() : bestFoundDistance(-1), numBestMatches(0), enabled(true)
+    ReadStats() : bestFoundDistance(-1), numBestMatches(0), enabled(true), prevMatchRC(false), prevMatchRefId(-1), prevMatchBeginPos(-1)
     {}
 };
 
@@ -402,7 +419,7 @@ int main(int argc, char const ** argv)
             // First, search for the most promising end position.
 
             unsigned ndlLength = sequenceLength(readId, targetGenomeFragments);
-            int minScore = -static_cast<int>(ndlLength * 0.01 * options.errorRate);
+            int minScore = -static_cast<int>(ndlLength * options.errorRate);
 
             TGenomeInfix inf = infix(filterFinder);  // TODO(holtgrew): Cannot pass to myersFinder directly because of const issues.
             TGenomeInfix origInf(inf);
@@ -470,7 +487,8 @@ int main(int argc, char const ** argv)
                 bestScore -= 1;
 
             // Update statistics for match.
-            readStats[readId].update(-bestScore, options.minDistance);
+            int pos = forward ? beginPos : contigLength - (newInfEndPos + 1);
+            readStats[readId].update(-bestScore, options.minDistance, refId, !forward, pos, ndlLength);
             
             // Store the single-end match in the list of raw matches.
             /*SingleEndMatch match;
@@ -513,8 +531,8 @@ int main(int argc, char const ** argv)
     (*outStream) << "fragment\ttarget ref\ttarget pos\tbest distance\tnum matches\n";
     for (unsigned i = 0; i < length(readStats); ++i)
     {
-        if (readStats[i].bestFoundDistance != -1 && readStats[i].bestFoundDistance < (int)options.minDistance)
-            continue;  // Skip.
+        //if (readStats[i].bestFoundDistance != -1 && readStats[i].bestFoundDistance < (int)options.minDistance)
+        //    continue;  // Skip.
 
         (*outStream) << targetGenomeFragments[i] << '\t' << targetGenomeIds[targetGenomeSources[i].i1]
                      << '\t' << targetGenomeSources[i].i2 << '\t' << readStats[i].bestFoundDistance
