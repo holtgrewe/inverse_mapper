@@ -123,6 +123,7 @@ struct ReadStats
                 return;  // Skip, too near.
 
             numBestMatches += 1;
+            // TODO(holtgrew): We should only purge these ones if there is no room for improvement, right?
             if (numBestMatches > (int)options.maxBestHits)
                 enabled = false;
 
