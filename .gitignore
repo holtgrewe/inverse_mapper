@@ -10,3 +10,11 @@
 *.lai
 *.la
 *.a
+
+# Temporary files
+\#*
+*\#
+*~
+
+# Compiled Python Files
+*.pyc
