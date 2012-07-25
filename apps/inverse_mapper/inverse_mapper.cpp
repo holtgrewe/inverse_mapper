@@ -305,12 +305,12 @@ int main(int argc, char const ** argv)
     seqan::FaiIndex faiIndex;
     if (options.verbosity > 0)
         std::cout << "Loading Index...\t" << std::flush;
-    if (seqan::load(faiIndex, options.hostGenomePath) != 0)
+    if (seqan::read(faiIndex, toCString(options.hostGenomePath)) != 0)
     {
         if (options.verbosity > 0)
             std::cout << "NOT FOUND\n"
                       << "Building Index...\t" << std::flush;
-        if (seqan::buildIndex(options.hostGenomePath, seqan::Fai()) != 0)
+        if (seqan::build(faiIndex, toCString(options.hostGenomePath)) != 0)
         {
             if (options.verbosity > 0)
                 std::cerr << "\nERROR: Index could not be loaded or built.\n";
@@ -318,11 +318,11 @@ int main(int argc, char const ** argv)
         }
         if (options.verbosity > 0)
             std::cout << "DONE\n"
-                      << "Loading Index...\t";
-        if (seqan::load(faiIndex, options.hostGenomePath) != 0)
+                      << "Writing Index...\t";
+        if (seqan::write(faiIndex) != 0)
         {
             if (options.verbosity > 0)
-                std::cerr << "\nERROR: Index could not be loaded after building.\n";
+                std::cerr << "\nERROR: Index could not be written after building.\n";
             return 1;
         }
         if (options.verbosity > 0)
@@ -341,7 +341,7 @@ int main(int argc, char const ** argv)
     if (options.verbosity > 0)
         std::cerr << "Building fragments...\t";
 
-    seqan::SequenceIO seqIO(options.targetGenomePath);
+    seqan::SequenceStream seqStream(options.targetGenomePath);
     seqan::StringSet<seqan::CharString> targetGenomeIds;
     seqan::StringSet<seqan::Dna5String> targetGenomeSeqs;
     // Genome Fragments and the sources of the fragments as (seq id, pos) pairs.
@@ -352,9 +352,9 @@ int main(int argc, char const ** argv)
     seqan::CharString id;
     seqan::Dna5String seq;
     seqan::String<ReadStats> readStats;  // TODO(holtgrew): Rename, because read == fragment.
-    for (unsigned seqId = 0; !atEnd(seqIO); ++seqId)
+    for (unsigned seqId = 0; !atEnd(seqStream); ++seqId)
     {
-        if (readRecord(id, seq, seqIO) != 0)
+        if (readRecord(id, seq, seqStream) != 0)
         {
             std::cerr << "\nERROR: Problem reading target sequence!\n";
             return 1;
@@ -385,7 +385,7 @@ int main(int argc, char const ** argv)
     {
         // Load contig.
         seqan::Dna5String contigSeq;
-        if (getSequence(contigSeq, faiIndex, refId) != 0)
+        if (readSequence(contigSeq, faiIndex, refId) != 0)
         {
             std::cerr << "ERROR: Could not load sequence " << refId << "\n";
             return 1;
