@@ -1,0 +1,56 @@
+Output SAM
+==========
+
+The output is formatted in the SAM format.
+
+The first lines starting with @ signs are the header.  The @SQ header gives
+the names of the reference sequences and their lengths, the rest of the
+headers is not very interesting.
+
+The header is followed by records, each record consists of tab-separated
+values.  There are 11 mandatory columns. We give descriptions for the
+interesting ones:
+
+ 1  QNAME  Name of the query, is ${target_seq_name}_${start}_${end}.
+ 2  FLAG   See below.
+ 3  RNAME  Name of matching reference sequence.
+ 4  POS    Position of match in reference sequence.
+ 5  MAPQ   -
+ 6  CIGAR  String describing alignment (see below).
+ 7  RNEXT  -
+ 8  PNEXT  -
+ 9  TLEN   -
+10  SEQ    Query segment, cut from forward strand in target.
+11  QUAL   -
+
+Interesting FLAG values are:
+
+ 0  Alignment fund on forward strand in host.
+ 4  Alignment found on reverse strand in host.
+16  No alignment for this fragment.
+
+The CIGAR string describes an alignment.  For example, the string
+3=1X4=1I3=4D3= is read as:
+
+  3=  3 matches
+  1X  1 mismatch
+  4=  4 matches
+  1I  1 insertion with respect to reference sequence.
+  3=  3 matches
+  4D  4 deletions with respect to reference sequence.
+  3=  3 matches
+
+The alignment could look as follows:
+
+  AAAAAAAA-AAAAAAAAAA
+  ||| |||| |||    |||
+  AAACAAAACAAA----AAA
+
+The mandatory columns are followed by tags, each tag consists of a two-letter
+identifier, followed by a ':', followed by its value.
+
+The following tags are used, we only print tags for aligned records.
+
+ * NM -- Edit distance to reference.
+ * NH -- Number of hits for this read reported (i.e. with best distance).
+ * XC -- Number of errors in the two center quarters of a read.

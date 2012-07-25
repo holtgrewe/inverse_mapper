@@ -43,6 +43,7 @@
 #include <seqan/index/find_pigeonhole.h>
 #include <seqan/arg_parse.h>
 #include <seqan/seq_io.h>
+#include <seqan/bam_io.h>
 
 // ==========================================================================
 // Classes
@@ -76,6 +77,8 @@ struct AppOptions
     unsigned maxBestHits;
     // The distance to use for the filtration.
     unsigned filtrationDistance;
+    // The fraction of a fragment to consider as border, errors here do not count into XC tag.
+    double borderFrac;
 
     // The error rate, computed from word size and min distance.
     double errorRate;
@@ -86,7 +89,7 @@ struct AppOptions
     // Path to output file.
     seqan::CharString outFile;
 
-    AppOptions() : verbosity(1), wordSize(0), minDistance(0), maxBestHits(0), filtrationDistance(0), errorRate(0), repeatLength(1000)
+    AppOptions() : verbosity(1), wordSize(0), minDistance(0), maxBestHits(0), filtrationDistance(0), borderFrac(0.25), errorRate(0), repeatLength(1000)
     {}
 
     unsigned computeQ() const
@@ -101,6 +104,10 @@ struct AppOptions
 
 struct ReadStats
 {
+    // Sample position.
+    int targetRefId;
+    int targetPos;
+    
     // Distance of best match, -1 means no match.
     int bestFoundDistance;
 
@@ -119,12 +126,12 @@ struct ReadStats
     {
         if (distance == bestFoundDistance)
         {
-            if ((prevMatchRefId == refId) && (rc == prevMatchRC) && (beginPos - prevMatchBeginPos < (int)options.wordSize))
-                return;  // Skip, too near.
+            // if ((prevMatchRefId == refId) && (rc == prevMatchRC) && (beginPos - prevMatchBeginPos < (int)options.wordSize))
+            //     return;  // Skip, too close.
 
             numBestMatches += 1;
-            // TODO(holtgrew): We should only purge these ones if there is no room for improvement, right?
-            if (numBestMatches > (int)options.maxBestHits)
+            // Disable if too many hits and there is no space for improvement in distance.
+            if (distance == (int)options.minDistance && numBestMatches > (int)options.maxBestHits)
                 enabled = false;
 
             prevMatchRC = rc;
@@ -145,13 +152,114 @@ struct ReadStats
         }
     }
 
-    ReadStats() : bestFoundDistance(-1), numBestMatches(0), enabled(true), prevMatchRC(false), prevMatchRefId(-1), prevMatchBeginPos(-1)
+    ReadStats() : targetRefId(-1), targetPos(-1), bestFoundDistance(-1), numBestMatches(0), enabled(true), prevMatchRC(false), prevMatchRefId(-1), prevMatchBeginPos(-1)
+    {}
+
+    ReadStats(int targetRefId, int targetPos) : targetRefId(targetRefId), targetPos(targetPos), bestFoundDistance(-1), numBestMatches(0), enabled(true), prevMatchRC(false), prevMatchRefId(-1), prevMatchBeginPos(-1)
+    {}
+};
+
+// --------------------------------------------------------------------------
+// Class MatchInfo
+// --------------------------------------------------------------------------
+
+// Store information about a match.
+
+struct MatchInfo
+{
+    int readId;
+    int distance;
+    int refId;
+    int beginPos;
+    int endPos;
+    seqan::String<seqan::CigarElement<> > cigarString;
+
+    MatchInfo() : readId(-1), distance(-1), refId(-1), beginPos(-1), endPos(-1)
+    {}
+
+    MatchInfo(int _readId, int _distance, int _refId, int _beginPos, int _endPos) :
+            readId(_readId), distance(_distance), refId(_refId), beginPos(_beginPos), endPos(_endPos)
     {}
 };
 
 // ==========================================================================
 // Functions
 // ==========================================================================
+
+// ----------------------------------------------------------------------------
+// Function getCigarString2()
+// ----------------------------------------------------------------------------
+
+namespace seqan {
+
+// Uses = for equality and X for mismatch.
+
+template <
+    typename TCigar,
+    typename TGaps1,
+    typename TGaps2>
+inline void
+getCigarString2(
+    TCigar &cigar,
+    TGaps1 &gaps1,
+    TGaps2 &gaps2,
+    int splicedGapThresh = 20)
+{
+    typename Iterator<TGaps1>::Type it1 = iter(gaps1, 0);
+    typename Iterator<TGaps2>::Type it2 = iter(gaps2, 0);
+    clear(cigar);
+    char op, lastOp = ' ';
+    unsigned numOps = 0;
+
+//  std::cout << gaps1 << std::endl;
+//  std::cout << gaps2 << std::endl;
+    for (; !atEnd(it1) && !atEnd(it2); goNext(it1), goNext(it2))
+    {
+        if (isGap(it1))
+        {
+            if (isGap(it2))
+                op = 'P';
+            else if (isClipped(it2))
+                op = '?';
+            else
+                op = 'I';
+        } 
+        else if (isClipped(it1))
+        {
+            op = '?';
+        }
+        else 
+        {
+            if (isGap(it2))
+                op = 'D';
+            else if (isClipped(it2))
+                op = 'S';
+            else
+                op = (*it1 == *it2) ? '=' : 'X';
+        }
+        
+        // append CIGAR operation
+        if (lastOp != op)
+        {
+            if (lastOp == 'D' && numOps >= (unsigned)splicedGapThresh)
+                lastOp = 'N';
+            if (numOps > 0)
+                append(cigar, CigarElement<>(lastOp, numOps));
+            numOps = 0;
+            lastOp = op;
+        }
+        ++numOps;
+    }
+//  if (atEnd(it1) != atEnd(it2))
+//        std::cerr << "Invalid pairwise alignment:" << std::endl << gaps1 << std::endl << gaps2 << std::endl;
+    SEQAN_ASSERT_EQ(atEnd(it1), atEnd(it2));
+    if (lastOp == 'D' && numOps >= (unsigned)splicedGapThresh)
+        lastOp = 'N';
+    if (numOps > 0)
+        append(cigar, CigarElement<>(lastOp, numOps));
+}
+
+}  // namespace seqan
 
 // ----------------------------------------------------------------------------
 // Function trimSeqHeaderToId()
@@ -165,6 +273,38 @@ void trimSeqHeaderToId(seqan::CharString & header)
         if (isspace(header[i]))
             break;
     resize(header, i);
+}
+
+// --------------------------------------------------------------------------
+// Function countCenterMatchInfo()
+// --------------------------------------------------------------------------
+
+// Count number of errors (non-'=') in the center of the read (within border of the begin/end of the string).
+
+int countCenterMatchInfo(seqan::String<seqan::CigarElement<> > const & cigarString, double border = 0.25)
+{
+    unsigned len = 0;
+    for (unsigned i = 0; i < length(cigarString); ++i)
+    {
+        if (cigarString[i].operation== 'M' || cigarString[i].operation== 'I' || cigarString[i].operation== '=' ||
+            cigarString[i].operation== 'X')
+            len += cigarString[i].count;
+    }
+    unsigned start = static_cast<unsigned>(border * len);
+    unsigned stop = static_cast<unsigned>(ceil((1.0 - border) * len));
+
+    int res = 0;
+    unsigned pos = 0;
+    for (unsigned i = 0; i < length(cigarString); ++i)
+    {
+        if (pos >= start && pos < stop && cigarString[i].operation != '=')
+            res += cigarString[i].count;
+        if (cigarString[i].operation== 'M' || cigarString[i].operation== 'I' || cigarString[i].operation== '=' ||
+            cigarString[i].operation== 'X')
+            pos += cigarString[i].count;
+    }
+
+    return res;
 }
 
 // --------------------------------------------------------------------------
@@ -208,6 +348,8 @@ parseCommandLine(AppOptions & options, int argc, char const ** argv)
     setDefaultValue(parser, "filtration-distance", "2");
     addOption(parser, seqan::ArgParseOption("m", "max-best-hits", "Maximal number of best hits before disabling.", seqan::ArgParseArgument::INTEGER, "INT"));
     setDefaultValue(parser, "max-best-hits", "10");
+    addOption(parser, seqan::ArgParseOption("", "border-frac", "Fraction of fragments to consider as border.  Not counted into XC tag in output.", seqan::ArgParseArgument::DOUBLE, "REAL"));
+    setDefaultValue(parser, "border-frac", "0.25");
 
     // Parse command line.
     seqan::ArgumentParser::ParseResult res = seqan::parse(parser, argc, argv);
@@ -232,6 +374,7 @@ parseCommandLine(AppOptions & options, int argc, char const ** argv)
     getOptionValue(options.maxBestHits, parser, "max-best-hits");
     options.errorRate = ((1.0 * options.minDistance) / options.wordSize) + 0.0001;
     getOptionValue(options.outFile, parser, "out-file");
+    getOptionValue(options.borderFrac, parser, "border-frac");
 
     return seqan::ArgumentParser::PARSE_OK;
 }
@@ -371,7 +514,7 @@ int main(int argc, char const ** argv)
                 continue;  // Skip N's.
             appendValue(targetGenomeSources, seqan::Pair<unsigned>(seqId, i));
             appendValue(targetGenomeFragments, targetInfix);
-            appendValue(readStats, ReadStats());
+            appendValue(readStats, ReadStats(seqId, i));
         }
     }
 
@@ -379,6 +522,10 @@ int main(int argc, char const ** argv)
         std::cerr << "DONE\n\n"
                   << "FRAGMENTS\t" << length(targetGenomeFragments) << "\n\n"
                   << "__PERFORMING SEARCH__________________________________________________________\n\n";
+
+    // We collect the best matches of each fragment.
+    seqan::StringSet<seqan::String<MatchInfo> > matches;
+    resize(matches, length(readStats));
 
     // Run pigeonhole+banded Myers search for each contig.
     for (unsigned refId = 0; refId < numSeqs(faiIndex); ++refId)
@@ -447,6 +594,10 @@ int main(int argc, char const ** argv)
             double contigStartTime = sysTime();
             if (options.verbosity > 0)
                 std::cerr << '[' << faiIndex.indexEntryStore[refId].name << "/" << (pass ? "rev " : "fwd ") << length(fragments) << " " << (length(contigSeq) / 1000 / 1000) << "M] " << std::flush;
+
+            // The Align object to store the semiglobal alignmetns in.
+            seqan::Align<seqan::Dna5String> align;
+
             while (find(filterFinder, filterPattern, options.errorRate))
             {
                 unsigned readId = idToPosition(targetGenomeFragments, positionToId(fragments, position(filterPattern).i1));
@@ -533,8 +684,38 @@ int main(int argc, char const ** argv)
                     bestScore -= 1;
 
                 // Update statistics for match.
-                int pos = forward ? beginPos : contigLength - (newInfEndPos + 1);
-                readStats[readId].update(-bestScore, refId, !forward, pos, options);
+                int matchBeginPos = forward ? beginPos : contigLength - (newInfEndPos + 1);
+                int matchEndPos = forward ? newInfEndPos + 1 : contigLength - beginPos;
+                int oldBestFoundDistance = readStats[readId].bestFoundDistance;
+                readStats[readId].update(-bestScore, refId, !forward, matchBeginPos, options);
+
+                // Clear matches if read was disabled or we have a new best distance.
+                if (!readStats[readId].enabled || oldBestFoundDistance != readStats[readId].bestFoundDistance)
+                    clear(matches[readId]);
+                // Perform and store alignment.
+                resize(rows(align), 2);
+                assignSource(row(align, 0), infix(contigSeq, beginPos, newInfEndPos + 1));
+                if (!forward)
+                    std::swap(matchBeginPos, matchEndPos);
+                assignSource(row(align, 1), targetGenomeFragments[readId]);
+                seqan::Score<int> scoringScheme(0, -999, -1001, -1000);
+                seqan::AlignConfig<true, false, false, true> alignConfig;
+                if (options.verbosity >= 3)
+                    std::cerr << "matchBeginPos == " << matchBeginPos << ", matchEndPos == " << matchEndPos << "\n";
+                int aliScore = globalAlignment(align, scoringScheme, alignConfig, seqan::Gotoh());
+                if (options.verbosity >= 3)
+                {
+                    std::cerr << "aliScore == " << aliScore << "\n";
+                    std::cerr << align;
+                }
+                SEQAN_ASSERT_EQ(-aliScore/scoreMismatch(scoringScheme), bestScore);
+                // Record match for read.
+                appendValue(matches[readId], MatchInfo(readId, -bestScore, refId, matchBeginPos, matchEndPos));
+                seqan::getCigarString2(back(matches[readId]).cigarString, row(align, 0), row(align, 1));
+                if (front(back(matches[readId]).cigarString).operation == 'D')
+                    erase(back(matches[readId]).cigarString, 0);
+                if (back(back(matches[readId]).cigarString).operation == 'D')
+                    eraseBack(back(matches[readId]).cigarString);
 
                 // Store the single-end match in the list of raw matches.
                 /*SingleEndMatch match;
@@ -584,15 +765,109 @@ int main(int argc, char const ** argv)
         std::cout << "OUTPUT STDOUT\n";
     }
 
-    (*outStream) << "fragment\ttarget ref\ttarget pos\tbest distance\tnum matches\n";
-    for (unsigned i = 0; i < length(readStats); ++i)
+
+    // Build BAM Header.
+    //
+    seqan::BamHeader bamHeader;
+    resize(bamHeader.records, 2 + numSeqs(faiIndex));
+    // @HD VN:1.4
+    seqan::BamHeaderRecord & headerHD = bamHeader.records[0];
+    headerHD.type = seqan::BAM_HEADER_FIRST;
+    resize(headerHD.tags, 1);
+    headerHD.tags[0].i1 = "VN";
+    headerHD.tags[0].i2 = "1.4";
+    // @PG ID:initial_search PN:inverse_mapper VN:0.1 CL:inverse_mapper ...
+    seqan::BamHeaderRecord & headerPG = bamHeader.records[1];
+    headerPG.type = seqan::BAM_HEADER_PROGRAM;
+    resize(headerPG.tags, 4);
+    headerPG.tags[0].i1 = "ID";
+    headerPG.tags[0].i2 = "initial_search";
+    headerPG.tags[1].i1 = "PN";
+    headerPG.tags[1].i2 = "inverse_mapper";
+    headerPG.tags[2].i1 = "VN";
+    headerPG.tags[2].i2 = "0.1";
+    headerPG.tags[3].i1 = "CL";
+    for (int i = 0; i < argc; ++i)
     {
+        if (i > 0)
+            appendValue(headerPG.tags[3].i2, ' ');
+        append(headerPG.tags[3].i2, argv[i]);
+    }
+    // @SQ headers and sequenceInfos.
+    seqan::StringSet<seqan::CharString> refNameStore;
+    resize(bamHeader.sequenceInfos, numSeqs(faiIndex));
+    for (unsigned i = 0; i < numSeqs(faiIndex); ++i)
+    {
+        appendValue(refNameStore, sequenceName(faiIndex, i));
+
+        bamHeader.sequenceInfos[i].i1 = sequenceName(faiIndex, i);
+        bamHeader.sequenceInfos[i].i2 = sequenceLength(faiIndex, i);
+
+        bamHeader.records[2 + i].type = seqan::BAM_HEADER_REFERENCE;
+        resize(bamHeader.records[2 + i].tags, 2);
+        bamHeader.records[2 + i].tags[0].i1 = "SN";
+        bamHeader.records[2 + i].tags[0].i2 = sequenceName(faiIndex, i);
+        bamHeader.records[2 + i].tags[1].i1 = "LN";
+        std::stringstream ss;
+        ss << sequenceLength(faiIndex, i);
+        bamHeader.records[2 + i].tags[1].i2 = ss.str();
+    }
+    seqan::NameStoreCache<seqan::StringSet<seqan::CharString> > refNameStoreCache(refNameStore);
+    seqan::BamIOContext<seqan::StringSet<seqan::CharString> > bamIOContext(refNameStore, refNameStoreCache);
+
+    seqan::write2(*outStream, bamHeader, bamIOContext, seqan::Sam());
+
+    seqan::BamAlignmentRecord record;
+    for (unsigned readId = 0; readId < length(readStats); ++readId)
+    {
+        clear(record);
+        ReadStats const & stats = readStats[readId];
+
+        // Fill parts of record that is the same for all matches of this fragment.
+        //
+        // QNAME
+        std::stringstream ss;
+        ss << targetGenomeIds[stats.targetRefId] << "_" << stats.targetPos << "_" << (stats.targetPos + options.wordSize);
+        record.qName = ss.str();
+        // SEQ
+        record.seq = targetGenomeFragments[readId];
+
+        // Write out not-found record.
+        if (empty(matches[readId]))
+        {
+            record.flag = seqan::BAM_FLAG_UNMAPPED;
+            write2(*outStream, record, bamIOContext, seqan::Sam());
+        }
+
+        // Write out matches.
+        for (unsigned i = 0; i < length(matches[readId]); ++i)
+        {
+            MatchInfo const & matchInfo = matches[readId][i];
+            // FLAG
+            record.flag = (matchInfo.beginPos > matchInfo.endPos) ? seqan::BAM_FLAG_RC : 0;
+            // CIGAR
+            record.cigar = matchInfo.cigarString;
+            // REF
+            record.rId = matchInfo.refId;
+            // POS
+            record.pos = std::min(matchInfo.beginPos, matchInfo.endPos);
+            // TAGS
+            seqan::BamTagsDict tags(record.tags);
+            // Distance to sequence.
+            setTagValue(tags, "NM", matchInfo.distance);
+            // Number of hits.
+            setTagValue(tags, "NH", stats.numBestMatches);
+            // Number of errors in the two center quarters of a read.
+            setTagValue(tags, "XC", countCenterMatchInfo(record.cigar, options.borderFrac));
+            
+            write2(*outStream, record, bamIOContext, seqan::Sam());
+        }
         //if (readStats[i].bestFoundDistance != -1 && readStats[i].bestFoundDistance < (int)options.minDistance)
         //    continue;  // Skip.
 
-        (*outStream) << targetGenomeFragments[i] << '\t' << targetGenomeIds[targetGenomeSources[i].i1]
-                     << '\t' << targetGenomeSources[i].i2 << '\t' << readStats[i].bestFoundDistance
-                     << '\t' << readStats[i].numBestMatches << '\n';
+        // (*outStream) << targetGenomeFragments[readId] << '\t' << targetGenomeIds[targetGenomeSources[readId].i1]
+        //              << '\t' << targetGenomeSources[readId].i2 << '\t' << readStats[readId].bestFoundDistance
+        //              << '\t' << readStats[readId].numBestMatches << '\n';
     }
 
     return 0;
