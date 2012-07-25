@@ -406,6 +406,8 @@ bool containsN(TSequence const & seq)
 
 int main(int argc, char const ** argv)
 {
+    double programStartTime = sysTime();
+
     // Parse the command line.
     seqan::ArgumentParser parser;
     AppOptions options;
@@ -869,6 +871,9 @@ int main(int argc, char const ** argv)
         //              << '\t' << targetGenomeSources[readId].i2 << '\t' << readStats[readId].bestFoundDistance
         //              << '\t' << readStats[readId].numBestMatches << '\n';
     }
+
+    if (options.verbosity >= 1)
+        std::cerr << "Total Time: " << (sysTime() - programStartTime) << " s\n";
 
     return 0;
 }
