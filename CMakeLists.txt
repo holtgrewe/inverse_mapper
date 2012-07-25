@@ -7,7 +7,6 @@ seqan_setup_includes(include SeqAnSandboxInverse_mapper)
 # register that we want it here, too.  Same for SeqAnExtras.
 seqan_make_seqan_available(SeqAnCore)
 seqan_make_seqan_available(SeqAnExtras)
-seqan_make_seqan_available(SeqAnSandboxEz_seq_io)
 
 include_directories(../ez_seq_io/include)
 
