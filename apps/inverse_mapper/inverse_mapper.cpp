@@ -441,6 +441,7 @@ int main(int argc, char const ** argv)
                   << "WORD SIZE      \t" << options.wordSize << '\n'
                   << "FILTER DISTANCE\t" << options.filtrationDistance << '\n'
                   << "MIN DISTANCE   \t" << options.minDistance << '\n'
+                  << "BORDER FRAC    \t" << options.borderFrac << '\n'
                   << "MAX BEST HITS  \t" << options.maxBestHits << '\n'
                   << "Q-GRAM SIZE    \t" << options.computeQ() << '\n'
                   << "ERROR RATE     \t[%] " << 100.0 * options.errorRate << "\n\n";
