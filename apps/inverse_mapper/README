@@ -54,3 +54,4 @@ The following tags are used, we only print tags for aligned records.
  * NM -- Edit distance to reference.
  * NH -- Number of hits for this read reported (i.e. with best distance).
  * XC -- Number of errors in the two center quarters of a read.
+ * XD -- If 0 then the read is enabled, if 1 then the read was disabled.

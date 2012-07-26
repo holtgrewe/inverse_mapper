@@ -15,6 +15,7 @@
 \#*
 *\#
 *~
+.*.swp
 
 # Compiled Python Files
 *.pyc

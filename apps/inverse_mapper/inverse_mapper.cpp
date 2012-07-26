@@ -107,7 +107,7 @@ struct ReadStats
     // Sample position.
     int targetRefId;
     int targetPos;
-    
+
     // Distance of best match, -1 means no match.
     int bestFoundDistance;
 
@@ -122,12 +122,16 @@ struct ReadStats
     int prevMatchRefId;
     int prevMatchBeginPos;
 
-    void update(int distance, int refId, bool rc, int beginPos, AppOptions const & options)
+    // Returns whether to append (1), to clear and append (2), or to do nothing (0).
+    int update(int distance, int refId, bool rc, int beginPos, AppOptions const & options)
     {
+        int res = 0;
+
         if (distance == bestFoundDistance)
         {
             // if ((prevMatchRefId == refId) && (rc == prevMatchRC) && (beginPos - prevMatchBeginPos < (int)options.wordSize))
             //     return;  // Skip, too close.
+            res = 1;
 
             numBestMatches += 1;
             // Disable if too many hits and there is no space for improvement in distance.
@@ -140,6 +144,7 @@ struct ReadStats
         }
         else if (bestFoundDistance == -1 || distance < bestFoundDistance)
         {
+            res = (bestFoundDistance != -1) ? 2 : 1;
             bestFoundDistance = distance;
             numBestMatches = 1;
 
@@ -150,6 +155,8 @@ struct ReadStats
             prevMatchRefId = refId;
             prevMatchBeginPos = beginPos;
         }
+
+        return res;
     }
 
     ReadStats() : targetRefId(-1), targetPos(-1), bestFoundDistance(-1), numBestMatches(0), enabled(true), prevMatchRC(false), prevMatchRefId(-1), prevMatchBeginPos(-1)
@@ -688,12 +695,12 @@ int main(int argc, char const ** argv)
                 // Update statistics for match.
                 int matchBeginPos = forward ? beginPos : contigLength - (newInfEndPos + 1);
                 int matchEndPos = forward ? newInfEndPos + 1 : contigLength - beginPos;
-                int oldBestFoundDistance = readStats[readId].bestFoundDistance;
-                readStats[readId].update(-bestScore, refId, !forward, matchBeginPos, options);
-
-                // Clear matches if read was disabled or we have a new best distance.
-                if (!readStats[readId].enabled || oldBestFoundDistance != readStats[readId].bestFoundDistance)
+                //int oldBestDistance = readStats[readId].bestFoundDistance;
+                int what = readStats[readId].update(-bestScore, refId, !forward, matchBeginPos, options);
+                if (what == 2)
                     clear(matches[readId]);
+                else if (what == 0)
+                    continue;
                 // Perform and store alignment.
                 resize(rows(align), 2);
                 assignSource(row(align, 0), infix(contigSeq, beginPos, newInfEndPos + 1));
@@ -710,9 +717,9 @@ int main(int argc, char const ** argv)
                     std::cerr << "aliScore == " << aliScore << "\n";
                     std::cerr << align;
                 }
-                SEQAN_ASSERT_EQ(-aliScore/scoreMismatch(scoringScheme), bestScore);
                 // Record match for read.
                 appendValue(matches[readId], MatchInfo(readId, -bestScore, refId, matchBeginPos, matchEndPos));
+                SEQAN_ASSERT_EQ((int)length(matches[readId]), readStats[readId].numBestMatches);
                 seqan::getCigarString2(back(matches[readId]).cigarString, row(align, 0), row(align, 1));
                 if (front(back(matches[readId]).cigarString).operation == 'D')
                     erase(back(matches[readId]).cigarString, 0);
@@ -861,7 +868,9 @@ int main(int argc, char const ** argv)
             setTagValue(tags, "NH", stats.numBestMatches);
             // Number of errors in the two center quarters of a read.
             setTagValue(tags, "XC", countCenterMatchInfo(record.cigar, options.borderFrac));
-            
+            // Whether the read was disabled or not.
+            setTagValue(tags, "XD", (int)(!stats.enabled));
+
             write2(*outStream, record, bamIOContext, seqan::Sam());
         }
         //if (readStats[i].bestFoundDistance != -1 && readStats[i].bestFoundDistance < (int)options.minDistance)
