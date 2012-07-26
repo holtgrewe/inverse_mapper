@@ -47,7 +47,7 @@ The alignment could look as follows:
   AAACAAAACAAA----AAA
 
 The mandatory columns are followed by tags, each tag consists of a two-letter
-identifier, followed by a ':', followed by its value.
+identifier, followed by a ':i:', followed by its value.
 
 The following tags are used, we only print tags for aligned records.
 
