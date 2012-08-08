@@ -35,6 +35,10 @@
 #include <fstream>
 #include <iostream>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <seqan/basic.h>
 #include <seqan/sequence.h>
 
@@ -194,6 +198,36 @@ struct MatchInfo
 // ==========================================================================
 
 // ----------------------------------------------------------------------------
+// Function isFileNewerThan()
+// ----------------------------------------------------------------------------
+
+// Returns true iff both paths exists and the file at leftPath is newer than the file at rightPath.
+
+#if PLATFORM_WINDOWS
+#define STAT_FUNC _stat
+#define STAT_STRUCT _stat
+#else   // #if PLATFORM_WINDOWS
+#define STAT_FUNC stat
+#define STAT_STRUCT stat
+#endif  // #if PLATFORM_WINDOWS
+
+bool isFileNewerThan(char const * leftPath, char const * rightPath)
+{
+    struct STAT_STRUCT leftBuf;
+    struct STAT_STRUCT rightBuf;
+
+    if (STAT_FUNC(leftPath, &leftBuf) != 0)
+        return false;
+    if (STAT_FUNC(rightPath, &rightBuf) != 0)
+        return false;
+
+    return leftBuf.st_mtime > rightBuf.st_mtime;
+}
+
+#undef STAT_FUNC
+#undef STAT_STRUCT
+
+// ----------------------------------------------------------------------------
 // Function getCigarString2()
 // ----------------------------------------------------------------------------
 
@@ -336,6 +370,8 @@ parseCommandLine(AppOptions & options, int argc, char const ** argv)
     addOption(parser, seqan::ArgParseOption("q", "quiet", "Set verbosity to a minimum."));
     addOption(parser, seqan::ArgParseOption("v", "verbose", "Enable verbose output."));
     addOption(parser, seqan::ArgParseOption("vv", "very-verbose", "Enable very verbose output."));
+    addOption(parser, seqan::ArgParseOption("uv", "ultra-verbose", "Enable ultra verbose output."));
+    hideOption(parser, "ultra-verbose");
 
     // Input / Output Options.
     addSection(parser, "Input / Output Options");
@@ -382,6 +418,13 @@ parseCommandLine(AppOptions & options, int argc, char const ** argv)
     options.errorRate = ((1.0 * options.minDistance) / options.wordSize) + 0.0001;
     getOptionValue(options.outFile, parser, "out-file");
     getOptionValue(options.borderFrac, parser, "border-frac");
+
+    if (options.computeQ() < 3)
+    {
+        std::cerr << "ERROR: q-gram size too slow.  Increase word size or number or "
+                  << "errors. [q = floor(w / (min_distance + 1))].\n";
+        return seqan::ArgumentParser::PARSE_ERROR;
+    }
 
     return seqan::ArgumentParser::PARSE_OK;
 }
@@ -458,11 +501,23 @@ int main(int argc, char const ** argv)
     seqan::FaiIndex faiIndex;
     if (options.verbosity > 0)
         std::cout << "Loading Index...\t" << std::flush;
-    if (seqan::read(faiIndex, toCString(options.hostGenomePath)) != 0)
+    bool rebuild = false;
+    seqan::CharString faiPath = options.hostGenomePath;
+    append(faiPath, ".fai");
+    if (isFileNewerThan(toCString(options.hostGenomePath), toCString(faiPath)))
+    {
+        rebuild = true;
+        std::cout << "OUTDATED\n";
+    }
+    else if (seqan::read(faiIndex, toCString(options.hostGenomePath)) != 0)
+    {
+        rebuild = true;
+        std::cout << "NOT FOUND\n";
+    }
+    if (rebuild)
     {
         if (options.verbosity > 0)
-            std::cout << "NOT FOUND\n"
-                      << "Building Index...\t" << std::flush;
+            std::cout << "Building Index...\t" << std::flush;
         if (seqan::build(faiIndex, toCString(options.hostGenomePath)) != 0)
         {
             if (options.verbosity > 0)
@@ -494,7 +549,7 @@ int main(int argc, char const ** argv)
     if (options.verbosity > 0)
         std::cerr << "Building fragments...\t";
 
-    seqan::SequenceStream seqStream(options.targetGenomePath);
+    seqan::SequenceStream seqStream(toCString(options.targetGenomePath));
     seqan::StringSet<seqan::CharString> targetGenomeIds;
     seqan::StringSet<seqan::Dna5String> targetGenomeSeqs;
     // Genome Fragments and the sources of the fragments as (seq id, pos) pairs.
@@ -577,14 +632,23 @@ int main(int argc, char const ** argv)
         for (unsigned pass = 0; pass < 2; ++pass)  // Pass 1: FWD, Pass 2: REV.
         {
             unsigned q = options.computeQ();
-            // std::cerr << "Building q-gram index with q = " << q << "...\n";
+            if (options.verbosity >= 3)
+                std::cerr << "Building q-gram index with q = " << q << "...\n";
             typedef seqan::Shape<seqan::Dna5, seqan::SimpleShape>    TShape;
             TShape shape(q);
+            if (options.verbosity >= 3)
+            {
+                seqan::CharString bitstr;
+                shapeToString(bitstr, shape);
+                std::cerr << "SHAPE\t" << bitstr << '\n';
+            }
 
             TFragmentSet fragments;
             for (unsigned fragId = 0; fragId < length(targetGenomeFragments); ++fragId)
                 if (readStats[fragId].enabled)
                     assignValueById(fragments, targetGenomeFragments[fragId]);
+            if (options.verbosity >= 3)
+                std::cerr << "LENGTH FRAGMENTS\t" << length(fragments) << '\n';
 
             typedef seqan::IndexQGram<TShape, seqan::OpenAddressing>  TSpec;
             typedef seqan::Index<TFragmentSet, TSpec>                 TQGramIndex;
@@ -611,6 +675,8 @@ int main(int argc, char const ** argv)
             while (find(filterFinder, filterPattern, options.errorRate))
             {
                 unsigned readId = idToPosition(targetGenomeFragments, positionToId(fragments, position(filterPattern).i1));
+                if (options.verbosity >= 4)
+                    std::cerr << "FOUND\n";
                 // Skip if disabled.
                 if (!readStats[readId].enabled)
                     continue;
@@ -636,7 +702,7 @@ int main(int argc, char const ** argv)
                 TMyersFinder myersFinder(inf);
                 int bestScore = seqan::MinValue<int>::VALUE;
                 unsigned bestPos = 0;
-                if (options.verbosity >= 11)
+                if (options.verbosity >= 4)
                     std::cerr << "    CONTIG: " << origInf << std::endl
                               << "    READ:   " << targetGenomeFragments[readId] << std::endl
                               << "    PREFIX: " << readPrefix << std::endl;
@@ -656,7 +722,7 @@ int main(int argc, char const ** argv)
                         bestScore = score;
                         bestPos = pos;
                     }
-                    if (options.verbosity >= 11)
+                    if (options.verbosity >= 4)
                         std::cerr << "MYERS CANDIDATE\t" << position(filterPattern).i1 << "\t" << refId << "\t" << (forward ? '+' : '-') << "\t" << contigLength << "\t" << (beginPosition(inf) + pos) << std::endl;
                 }
                 if (bestScore == seqan::MinValue<int>::VALUE)
