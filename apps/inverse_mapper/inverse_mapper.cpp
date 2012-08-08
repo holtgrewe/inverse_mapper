@@ -580,6 +580,7 @@ int main(int argc, char const ** argv)
             appendValue(targetGenomeSources, seqan::Pair<unsigned>(seqId, i));
             appendValue(targetGenomeFragments, targetInfix);
             appendValue(readStats, ReadStats(seqId, i));
+            back(readStats).enabled = true;
         }
     }
 
@@ -644,10 +645,16 @@ int main(int argc, char const ** argv)
             }
 
             TFragmentSet fragments;
+            seqan::String<unsigned> fragIdMap;  // Position in fragments to position in targetGenomeFragments.
             for (unsigned fragId = 0; fragId < length(targetGenomeFragments); ++fragId)
+            {
                 if (readStats[fragId].enabled)
-                    assignValueById(fragments, targetGenomeFragments[fragId]);
-            if (options.verbosity >= 3)
+                {
+                    appendValue(fragIdMap, fragId);
+                    appendValue(fragments, targetGenomeFragments[fragId]);
+                }
+            }
+            if (options.verbosity >= 2)
                 std::cerr << "LENGTH FRAGMENTS\t" << length(fragments) << '\n';
 
             typedef seqan::IndexQGram<TShape, seqan::OpenAddressing>  TSpec;
@@ -674,7 +681,7 @@ int main(int argc, char const ** argv)
 
             while (find(filterFinder, filterPattern, options.errorRate))
             {
-                unsigned readId = idToPosition(targetGenomeFragments, positionToId(fragments, position(filterPattern).i1));
+                unsigned readId = fragIdMap[position(filterPattern).i1];
                 if (options.verbosity >= 4)
                     std::cerr << "FOUND\n";
                 // Skip if disabled.
@@ -693,6 +700,8 @@ int main(int argc, char const ** argv)
 
                 unsigned ndlLength = sequenceLength(readId, targetGenomeFragments);
                 int minScore = -static_cast<int>(options.filtrationDistance);
+
+                // TODO(holtgrew): Need to remove the "force last bases to align" feature.
 
                 TGenomeInfix inf = infix(filterFinder);  // TODO(holtgrew): Cannot pass to myersFinder directly because of const issues.
                 TGenomeInfix origInf(inf);
