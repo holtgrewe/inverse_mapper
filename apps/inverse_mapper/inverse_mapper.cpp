@@ -749,8 +749,8 @@ int main(int argc, char const ** argv)
 
                     TGenomeInfix inf = infix(filterFinder);  // TODO(holtgrew): Cannot pass to myersFinder directly because of const issues.
                     TGenomeInfix origInf(inf);
-                    // setEndPosition(inf, endPosition(inf) - 1);
-                    // ndlLength -= 1;
+                    setEndPosition(inf, endPosition(inf) - 1);
+                    ndlLength -= 1;
                     TReadPrefix readPrefix(targetGenomeFragments[readId], ndlLength);
                     TMyersFinder myersFinder(inf);
                     int bestScore = seqan::MinValue<int>::VALUE;
@@ -765,10 +765,10 @@ int main(int argc, char const ** argv)
                         TPosition const pos = position(hostIterator(myersFinder));
                         int score = getScore(patternState);
 
-                        SEQAN_ASSERT_LT(pos/* + 1*/, length(origInf));
-                        // if (origInf[pos + 1] != back(targetGenomeFragments[readId]) || origInf[pos + 1] == seqan::unknownValue<seqan::Dna5>())
-                        //     if (--score < minScore)
-                        //         continue;
+                        SEQAN_ASSERT_LT(pos + 1, length(origInf));
+                        if (origInf[pos + 1] != back(targetGenomeFragments[readId]) || origInf[pos + 1] == seqan::unknownValue<seqan::Dna5>())
+                            if (--score < minScore)
+                                continue;
 
                         if (getScore(patternState) > bestScore)
                         {
@@ -783,7 +783,7 @@ int main(int argc, char const ** argv)
 
                     // Second, search for the leftmost start position of the hit.
                     __int64 infEndPos = endPosition(inf);
-                    __int64 newInfEndPos = beginPosition(inf) + bestPos/* + 1*/;
+                    __int64 newInfEndPos = beginPosition(inf) + bestPos + 1;
                     revPatternState.leftClip = infEndPos - newInfEndPos + rightClip;
                     setEndPosition(inf, newInfEndPos);
                     if (endPosition(inf) > (unsigned)(ndlLength - bestScore))
@@ -791,9 +791,9 @@ int main(int argc, char const ** argv)
                     else
                         setBeginPosition(inf, 0);
 
-                    // // Correct bestScore for reverse search below.
-                    // if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
-                    //     bestScore += 1;
+                    // Correct bestScore for reverse search below.
+                    if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
+                        bestScore += 1;
 
                     TRevReadPrefix readRev(readPrefix);
                     TGenomeInfixRev infRev(inf);
@@ -804,17 +804,17 @@ int main(int argc, char const ** argv)
                                   << "  R READPRFX:   " << readRev << std::endl
                                   << "    best score: " << bestScore << std::endl;
                     while (find(myersFinderRev, readRev, revPatternState, bestScore))
-                        beginPos = newInfEndPos - (position(myersFinderRev)/* + 1*/);
+                        beginPos = newInfEndPos - (position(myersFinderRev) + 1);
                     if (beginPos == newInfEndPos)
                         continue;  // No Banded Myers hit, skip.
 
-                    // // Correct bestScore for output.
-                    // if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
-                    //     bestScore -= 1;
+                    // Correct bestScore for output.
+                    if (origInf[bestPos + 1] != back(targetGenomeFragments[readId]) || origInf[bestPos + 1] == seqan::unknownValue<seqan::Dna5>())
+                        bestScore -= 1;
 
                     // Update statistics for match.
-                    int matchBeginPos = forward ? beginPos : contigLength - (newInfEndPos/* + 1*/);
-                    int matchEndPos = forward ? newInfEndPos/* + 1*/ : contigLength - beginPos;
+                    int matchBeginPos = forward ? beginPos : contigLength - (newInfEndPos + 1);
+                    int matchEndPos = forward ? newInfEndPos + 1 : contigLength - beginPos;
                     // int oldBestFoundDistance = readStats[readId].bestFoundDistance;
                     int what = readStats[readId].update(-bestScore, globalRefId, !forward, matchBeginPos, options);
 
@@ -825,7 +825,7 @@ int main(int argc, char const ** argv)
                         continue;
                     // Perform and store alignment.
                     resize(rows(align), 2);
-                    assignSource(row(align, 0), infix(contigSeq, beginPos-1, newInfEndPos/* + 1*/));
+                    assignSource(row(align, 0), infix(contigSeq, beginPos, newInfEndPos + 1));
                     if (!forward)
                         std::swap(matchBeginPos, matchEndPos);
                     assignSource(row(align, 1), targetGenomeFragments[readId]);
@@ -1013,7 +1013,7 @@ int main(int argc, char const ** argv)
     }
 
     if (options.verbosity >= 1)
-        std::cerr << "Total Time: " << (sysTime() - programStartTime() << " s\n";
+        std::cerr << "Total Time: " << (sysTime() - programStartTime) << " s\n";
     
     return 0;
 }
